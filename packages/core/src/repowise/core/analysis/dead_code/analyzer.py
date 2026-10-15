@@ -105,6 +105,7 @@ from .risk_factors import (
     path_risk_factors,
     risk_evidence,
 )
+from .swift_reachability import build_swift_named_files
 from .vbnet_modules import vbnet_module_names
 
 #: The unindexed scan below and the repo-wide absence check ask the same
@@ -884,6 +885,7 @@ class DeadCodeAnalyzer:
         # scopes the C# name rescue to the projects that can see a file.
         self._dotnet_index = dotnet_index
         self._csharp_named_files: frozenset[str] | None = None
+        self._swift_named_files: frozenset[str] | None = None
         # C# classes a plugin host or container finds by type, built on first use.
         self._csharp_discovered: frozenset[tuple[str, str]] | None = None
         self._parsed_files = parsed_files or {}
@@ -988,11 +990,14 @@ class DeadCodeAnalyzer:
                 repo_root=self._repo_root,
                 discovered=self._csharp_discovered_classes(),
             )
+        if self._swift_named_files is None:
+            self._swift_named_files = build_swift_named_files(self.graph, self._source_map)
         return ReachabilityRescues(
             bundler_alias_targets=frozenset(self._bundler_alias_targets),
             whitelist=frozenset(whitelist),
             package_files=self._package_files,
             csharp_named_files=self._csharp_named_files,
+            swift_named_files=self._swift_named_files,
         )
 
     def analyze(
