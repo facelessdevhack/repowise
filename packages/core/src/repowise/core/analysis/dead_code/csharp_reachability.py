@@ -95,12 +95,36 @@ _ASSEMBLY_EFFECT = re.compile(
 #: ``AssignableTo(typeof(T))``) and the hand-written reflection loop
 #: (``typeof(T).IsAssignableFrom``, ``t.IsAssignableTo(typeof(T))``).
 #: Group 1 is the type's name, namespace-qualified or not.
+#: The NUnit constraint ``Is.AssignableTo<T>()`` is an assertion, not a scan,
+#: and FluentAssertions' ``BeAssignableTo<T>()`` never meets the word boundary.
 _SCANNING_CALL = re.compile(
-    rb"\b(?:GetExports|GetExportTypes|GetExportedValues|AssignableTo)\s*<\s*([A-Za-z_][\w.]*)"
+    rb"\b(?:GetExports|GetExportTypes|GetExportedValues|(?<!Is\.)AssignableTo)"
+    rb"\s*<\s*([A-Za-z_][\w.]*)"
     rb"|\btypeof\s*\(\s*([A-Za-z_][\w.]*)[^()]*\)\s*\.\s*IsAssignableFrom\b"
-    rb"|\b(?:IsAssignableTo|AssignableTo)\s*\(\s*typeof\s*\(\s*([A-Za-z_][\w.]*)"
+    rb"|\b(?:IsAssignableTo|(?<!Is\.)AssignableTo)\s*\(\s*typeof\s*\(\s*([A-Za-z_][\w.]*)"
 )
 _SCANNING_HINTS: tuple[bytes, ...] = (b"GetExport", b"Assignable")
+#: Framework types nearly any class is assignable to. A scan over one of them
+#: (``typeof(IDisposable).IsAssignableFrom`` in a cleanup loop) says nothing
+#: about which plugin types a host loads, and would rescue every implementer
+#: in the repository. Any ``System.``-qualified name is skipped too.
+_UNSCANNED_TYPES: frozenset[str] = frozenset(
+    {
+        "IDisposable",
+        "IAsyncDisposable",
+        "IComparable",
+        "IEquatable",
+        "IEnumerable",
+        "ICloneable",
+        "Exception",
+        "Attribute",
+        "object",
+        "Object",
+        "Task",
+        "Stream",
+        "ValueType",
+    }
+)
 #: MEF attributes: ``[Export]`` on a class exports it, ``[InheritedExport]`` on
 #: a base type exports every type deriving from it.
 _EXPORT_ATTRIBUTES: frozenset[str] = frozenset({"Export", "ExportAttribute"})
@@ -434,15 +458,28 @@ def _attribute_bases(data: dict) -> set[str]:
     }
 
 
-def _scanned_type_names(source_map: Mapping[str, bytes]) -> set[str]:
-    """Simple names of the types a scanning call shape collects implementations of."""
+def _simple_type_name(name: str) -> str:
+    """``IFoo`` for ``Ns.IFoo<A, B>``: generic arguments and namespace dropped."""
+    return name.split("<", 1)[0].strip().rsplit(".", 1)[-1]
+
+
+def _scanned_type_names(graph: Any, source_map: Mapping[str, bytes]) -> set[str]:
+    """Simple names of the types a scanning call shape collects implementations of.
+
+    Test files are not read: a test that scans an assembly checks the host, it
+    does not load plugins.
+    """
     names: set[str] = set()
     for path, blob in source_map.items():
         if not path.endswith(CSHARP_SUFFIX) or not any(h in blob for h in _SCANNING_HINTS):
             continue
+        if graph.nodes.get(path, {}).get("is_test", False):
+            continue
         for match in _SCANNING_CALL.finditer(_code_only(blob)):
-            name = next(group for group in match.groups() if group)
-            names.add(name.rsplit(b".", 1)[-1].decode("ascii", "ignore"))
+            raw = next(group for group in match.groups() if group).decode("utf-8", "ignore")
+            name = _simple_type_name(raw)
+            if not raw.startswith("System.") and name not in _UNSCANNED_TYPES:
+                names.add(name)
     return names
 
 
@@ -458,7 +495,9 @@ def _heritage_names(graph: Any, parsed_files: Mapping[str, Any]) -> dict[tuple[s
     for path, parsed in parsed_files.items():
         if path.endswith(CSHARP_SUFFIX):
             for rel in getattr(parsed, "heritage", ()) or ():
-                out.setdefault((path, rel.child_name), set()).add(rel.parent_name)
+                out.setdefault((path, rel.child_name), set()).add(
+                    _simple_type_name(rel.parent_name)
+                )
     for child, parent, edge in graph.edges(data=True):
         if edge.get("edge_type") not in _HERITAGE_EDGE_TYPES:
             continue
@@ -482,7 +521,7 @@ def scanned_implementations(
     type parameter (``GetExports<T>`` inside the host's own generic method)
     matches nothing: a wider match only widens a rescue.
     """
-    bases = _scanned_type_names(source_map)
+    bases = _scanned_type_names(graph, source_map)
     classes: list[dict] = []
     for _node, data in graph.nodes(data=True):
         if data.get("node_type") != "symbol" or data.get("language") != "csharp":
