@@ -31,6 +31,13 @@ A file linked into another project by ``<Compile Include>`` is visible from
 that project too. Ceiling: items pulled in through ``.projitems`` / ``.props``
 imports or wildcards, and reflection by a computed name, are not seen. Both
 leave a finding as it was before this pass existed.
+
+A plugin host names no implementation at all: ``GetExports<IScheduledTask>()``
+instantiates every loaded type assignable to the interface. A concrete class
+that inherits, directly or transitively, from a type passed to one of the
+scanning call shapes in :func:`scanned_implementations`, or that MEF exports,
+counts as named too. A DI registration that names the implementation
+(``AddScoped<IFoo, Foo>()``) needs no rule: the name rescue already sees it.
 """
 
 from __future__ import annotations
@@ -79,6 +86,28 @@ _ASSEMBLY_EFFECT = re.compile(
     rb"(?![ \t]*(?:System\.Diagnostics\.CodeAnalysis\.)?SuppressMessage)|global[ \t]+using[ \t])",
     re.MULTILINE,
 )
+
+
+#: Calls that instantiate or register every type assignable to the type they
+#: name, so no source names the implementations. Deliberately explicit: the
+#: jellyfin/Emby plugin host (``GetExports<T>``, ``GetExportTypes<T>``), MEF
+#: (``GetExportedValues<T>``), Scrutor (``AssignableTo<T>()``,
+#: ``AssignableTo(typeof(T))``) and the hand-written reflection loop
+#: (``typeof(T).IsAssignableFrom``, ``t.IsAssignableTo(typeof(T))``).
+#: Group 1 is the type's name, namespace-qualified or not.
+_SCANNING_CALL = re.compile(
+    rb"\b(?:GetExports|GetExportTypes|GetExportedValues|AssignableTo)\s*<\s*([A-Za-z_][\w.]*)"
+    rb"|\btypeof\s*\(\s*([A-Za-z_][\w.]*)[^()]*\)\s*\.\s*IsAssignableFrom\b"
+    rb"|\b(?:IsAssignableTo|AssignableTo)\s*\(\s*typeof\s*\(\s*([A-Za-z_][\w.]*)"
+)
+_SCANNING_HINTS: tuple[bytes, ...] = (b"GetExport", b"Assignable")
+#: MEF attributes: ``[Export]`` on a class exports it, ``[InheritedExport]`` on
+#: a base type exports every type deriving from it.
+_EXPORT_ATTRIBUTES: frozenset[str] = frozenset({"Export", "ExportAttribute"})
+_INHERITED_EXPORT_ATTRIBUTES: frozenset[str] = frozenset(
+    {"InheritedExport", "InheritedExportAttribute"}
+)
+_HERITAGE_EDGE_TYPES: frozenset[str] = frozenset({"extends", "implements"})
 
 
 def _code_only(blob: bytes) -> bytes:
@@ -324,13 +353,15 @@ def build_csharp_named_files(
     *,
     dotnet_index: Any | None = None,
     repo_root: Path | None = None,
+    discovered: AbstractSet[tuple[str, str]] = frozenset(),
 ) -> frozenset[str]:
     """The C# files with no importer that something names.
 
     One pass over the scanned corpus, collecting only the names some candidate
     declares, so the cost is linear in source size whatever the candidate
     count. With no .NET index the scope is the whole repository, which is the
-    wider and therefore safer rescue.
+    wider and therefore safer rescue. *discovered* is
+    :func:`scanned_implementations`: their files count as named.
     """
     candidates = _candidates(graph)
     if not source_map and dotnet_index is None:
@@ -349,7 +380,8 @@ def build_csharp_named_files(
             continue
         names.add(path, {name: path for name in types}, {name: path for name in extensions})
     names.scan_corpus(graph, source_map, dotnet_index, repo_root)
-    return frozenset(assembly_level | names.named)
+    found = {path for path, _name in discovered}
+    return frozenset(assembly_level | names.named | found.intersection(candidates))
 
 
 def build_csharp_named_types(
@@ -359,6 +391,7 @@ def build_csharp_named_types(
     *,
     dotnet_index: Any | None = None,
     repo_root: Path | None = None,
+    discovered: AbstractSet[tuple[str, str]] = frozenset(),
 ) -> frozenset[tuple[str, str]]:
     """The ``(path, name)`` pairs of *wanted* that another file in scope names.
 
@@ -366,8 +399,10 @@ def build_csharp_named_types(
     scope and the same rules, asked of one top-level type at a time: *wanted*
     maps a ``.cs`` file to the public types the unused-export pass would
     report there. A holder class counts as named when one of its extension
-    methods is invoked as a member. With no source at all nothing is named,
-    which leaves every finding as it was before this pass.
+    methods is invoked as a member, and a *discovered* class
+    (:func:`scanned_implementations`) is named by the runtime. With no source
+    at all nothing is named, which leaves every finding as it was before this
+    pass.
     """
     if not source_map and dotnet_index is None:
         return frozenset()
@@ -387,7 +422,101 @@ def build_csharp_named_types(
         )
         names.add(path, types, extensions)
     names.scan_corpus(graph, source_map, dotnet_index, repo_root)
-    return frozenset(names.named)
+    found = {pair for pair in discovered if pair[1] in wanted.get(pair[0], ())}
+    return frozenset(names.named | found)
+
+
+def _attribute_bases(data: dict) -> set[str]:
+    """``Export`` for ``[System.ComponentModel.Composition.Export(typeof(I))]``."""
+    return {
+        str(text).split("(", 1)[0].strip().rsplit(".", 1)[-1]
+        for text in data.get("decorators") or ()
+    }
+
+
+def _scanned_type_names(source_map: Mapping[str, bytes]) -> set[str]:
+    """Simple names of the types a scanning call shape collects implementations of."""
+    names: set[str] = set()
+    for path, blob in source_map.items():
+        if not path.endswith(CSHARP_SUFFIX) or not any(h in blob for h in _SCANNING_HINTS):
+            continue
+        for match in _SCANNING_CALL.finditer(_code_only(blob)):
+            name = next(group for group in match.groups() if group)
+            names.add(name.rsplit(b".", 1)[-1].decode("ascii", "ignore"))
+    return names
+
+
+def _heritage_names(graph: Any, parsed_files: Mapping[str, Any]) -> dict[tuple[str, str], set[str]]:
+    """``{(file, type name): its base type names}`` for C# types.
+
+    Read from the parsed relations as well as the graph's heritage edges: the
+    resolver leaves a generic base (``IRemoteMetadataProvider<Episode,
+    EpisodeInfo>``) unresolved when the name has generic and plain
+    declarations, and that is exactly the plugin interface shape.
+    """
+    out: dict[tuple[str, str], set[str]] = {}
+    for path, parsed in parsed_files.items():
+        if path.endswith(CSHARP_SUFFIX):
+            for rel in getattr(parsed, "heritage", ()) or ():
+                out.setdefault((path, rel.child_name), set()).add(rel.parent_name)
+    for child, parent, edge in graph.edges(data=True):
+        if edge.get("edge_type") not in _HERITAGE_EDGE_TYPES:
+            continue
+        data = graph.nodes.get(child, {})
+        if data.get("language") == "csharp" and data.get("name"):
+            name = graph.nodes.get(parent, {}).get("name")
+            if name:
+                out.setdefault((data.get("file_path") or "", data["name"]), set()).add(name)
+    return out
+
+
+def scanned_implementations(
+    graph: Any, source_map: Mapping[str, bytes], parsed_files: Mapping[str, Any] | None = None
+) -> frozenset[tuple[str, str]]:
+    """``(file, class)`` for each concrete C# class the runtime discovers by type.
+
+    A class qualifies when it inherits, directly or transitively, from a type a
+    scanning call names (:data:`_SCANNING_CALL`), carries MEF ``[Export]``, or
+    derives from a type carrying ``[InheritedExport]``. Above the class itself
+    the walk is by simple name, so same-named bases union their parents, and a
+    type parameter (``GetExports<T>`` inside the host's own generic method)
+    matches nothing: a wider match only widens a rescue.
+    """
+    bases = _scanned_type_names(source_map)
+    classes: list[dict] = []
+    for _node, data in graph.nodes(data=True):
+        if data.get("node_type") != "symbol" or data.get("language") != "csharp":
+            continue
+        kind = data.get("kind")
+        if kind not in _TYPE_KINDS:
+            continue
+        attributes = _attribute_bases(data)
+        if attributes & _INHERITED_EXPORT_ATTRIBUTES:
+            bases.add(data.get("name") or "")
+        if kind in ("class", "record") and not {"abstract", "static"} & set(
+            data.get("modifiers") or ()
+        ):
+            classes.append(data)
+    exported = [d for d in classes if _attribute_bases(d) & _EXPORT_ATTRIBUTES]
+    out = {(d.get("file_path") or "", d.get("name") or "") for d in exported}
+    if not bases:
+        return frozenset(out)
+    heritage = _heritage_names(graph, parsed_files or {})
+    by_name: dict[str, set[str]] = {}
+    for (_path, name), parents in heritage.items():
+        by_name.setdefault(name, set()).update(parents)
+    for data in classes:
+        key = (data.get("file_path") or "", data.get("name") or "")
+        seen = set(heritage.get(key, ()))
+        stack = list(seen)
+        while stack and not seen & bases:
+            for parent in by_name.get(stack.pop(), ()):
+                if parent not in seen:
+                    seen.add(parent)
+                    stack.append(parent)
+        if seen & bases:
+            out.add(key)
+    return frozenset(out)
 
 
 def _extension_holders(graph: Any, path: str) -> Iterable[tuple[bytes, str]]:
