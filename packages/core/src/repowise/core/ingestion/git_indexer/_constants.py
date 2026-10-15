@@ -325,9 +325,9 @@ HOTSPOT_HALFLIFE_DAYS: float = 180.0
 #: forge bot accounts).
 #: v2: co-change records carry focused_frequency, the shared commits no wider
 #: than the change-entropy sweep cap.
-#: v3: commits carry their category, and changes are rebuilt from history.
-#: v4: the default history window grew from 500 to 5,000 commits.
-GIT_HISTORY_VERSION: int = 4
+#: v3: commits carry their category, and changes are rebuilt from history; the
+#: default history window grew from 500 to 5,000 commits.
+GIT_HISTORY_VERSION: int = 3
 GIT_HISTORY_VERSION_KEY = "git_history_version"
 #: Stored under :data:`GIT_HISTORY_VERSION_KEY` by ``repowise attribution
 #: backfill`` so the next update re-walks history to label the newly bound

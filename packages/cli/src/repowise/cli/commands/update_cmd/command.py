@@ -1244,9 +1244,11 @@ def run_update(
         # where an orientation page registered after the index was built is
         # most likely to go unmentioned forever: it returns before the
         # generation code, so nothing else in the run can notice.
+        from .commit_limit_notice import surface_pinned_commit_limit
         from .slot_notice import surface_missing_slots
 
         surface_missing_slots(repo_path, emitter=emitter, dry_run=dry_run)
+        surface_pinned_commit_limit(repo_path, emitter=emitter, dry_run=dry_run)
         if emitter is not None:
             emitter.done(
                 ok=True,
@@ -1372,9 +1374,11 @@ def run_update(
     # An orientation page registered after this index was built cannot arrive
     # below, because this run's parsed_files is the changed-file slice, so name
     # the command that does reach it. Says nothing when there is nothing to say.
+    from .commit_limit_notice import surface_pinned_commit_limit
     from .slot_notice import surface_missing_slots
 
     surface_missing_slots(repo_path, emitter=emitter, dry_run=dry_run)
+    surface_pinned_commit_limit(repo_path, emitter=emitter, dry_run=dry_run)
 
     render_header(repo_path, base_ref, head)
 

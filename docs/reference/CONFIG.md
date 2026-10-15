@@ -164,9 +164,10 @@ You can edit this file directly. Changes take effect on the next `init`,
 | `forges.hosts` | `{}` | Maps a self-managed git host to its forge (`github`, `gitlab`, `azure`, `bitbucket`, `generic`). See [GIT_HOSTS.md](../start/GIT_HOSTS.md#self-managed-hosts) |
 
 `commit_limit` sets how far back history-based signals see: churn, co-change,
-the commit list and change records. An index built under the older 500-commit
-default re-reads its history once on the next `repowise update`, with no model
-calls. A `commit_limit` written in `config.yaml` is kept as set.
+the commit list and change records. The first `repowise update` after upgrading
+re-reads the history once, with no model calls. A `commit_limit` written in
+`config.yaml` is kept as set, and when it is below the default `repowise update`
+says so once.
 
 `reasoning` controls documentation-generation calls for reasoning-capable chat
 models. `auto` preserves provider defaults. `off`/`none` disable Qwen3-style
