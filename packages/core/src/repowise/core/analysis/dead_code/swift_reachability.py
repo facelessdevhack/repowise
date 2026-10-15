@@ -6,24 +6,26 @@ resolves to a single file of that target. So ``in_degree == 0`` on a ``.swift``
 file is mostly a property of the language: on IceCubesApp none of 30 judged
 "unreachable" files was dead.
 
-A Swift file is reachable here when one of these holds:
+A Swift file nothing imports is reachable here when a *live* file (one that is
+an entry, has an importer, is a test, or was itself reached) does one of:
 
-* a symbol it declares carries a use edge from another file (``TagRowView(tag:)``
-  lands a ``calls`` edge on the type, not on its file);
-* a type it declares is written in another Swift file (``[StatusHistory]``,
-  ``catch let error as ServerError``), which is how Swift names a type from
-  anywhere in its module or an importing one, and which the graph carries no
-  edge for;
-* it extends a type (``extension Color``, ``extension StatusEditor.EditorStore``)
-  that is declared outside the repository or in a file that is itself
-  reachable. An extension is part of the type it extends; whether its members
-  are used is a member-level question.
+* lands a use edge on a symbol the file declares (``TagRowView(tag:)`` lands a
+  ``calls`` edge on the type, not on its file);
+* writes a type the file declares in a type position: after ``:``, ``<``,
+  ``[``, ``(``, ``,``, ``->``, ``as`` or ``is``, or followed by ``(`` or ``.``
+  (``[StatusHistory]``, ``catch let error as ServerError``). Only a name one
+  file of the repository declares counts, and never a ubiquitous
+  Swift/Foundation/SwiftUI name, since the text cannot tell which one it means;
+* for an extension of a type the repository declares, is the type's file; for
+  an extension of a platform type (``extension Color``), uses one of the
+  extension's members, by an edge or by ``.member`` / ``member(`` written
+  elsewhere, when no other file declares that member name.
 
-Like the C# pass it only rescues, so every approximation errs toward
-"reachable": a comment mention does not count, but a same-named type anywhere
-in the repository does. Ceiling: a principal class named only by an
-``Info.plist`` or a storyboard, and a file listed only in ``project.pbxproj``,
-are not seen.
+Uses are counted from live files only and the answer is a fixpoint, so two dead
+files that name each other stay dead. Comments and string literals are
+stripped before reading names. Like the C# pass it only rescues. Ceiling: a
+principal class named only by an ``Info.plist`` or a storyboard, and a file
+listed only in ``project.pbxproj``, are not seen.
 """
 
 from __future__ import annotations
@@ -35,8 +37,8 @@ from typing import Any
 from repowise.core.ids import file_path_of, is_external
 
 from ...entry_candidacy import is_reachability_root
+from ...ingestion.languages.swift_same_module import _SWIFT_COMMON_TYPES
 from ...ingestion.models import REACHABILITY_USE_EDGE_TYPES
-from .csharp_reachability import _code_only
 from .file_reachability import has_dependency_importer
 
 SWIFT_SUFFIX = ".swift"
@@ -46,26 +48,61 @@ SWIFT_SUFFIX = ".swift"
 _TYPE_KINDS: frozenset[str] = frozenset({"class", "interface"})
 _EXTENSION_KIND = "impl"
 
-_IDENT = re.compile(rb"[A-Za-z_][A-Za-z0-9_]*")
+_NAME = r"[^\W\d]\w*"
+#: A name in a type position: the last component of an optionally qualified
+#: name after a type-introducing token, or a name followed by ``(`` or ``.``.
+_TYPE_USE = re.compile(
+    rf"(?:[:<\[(,]|->|\bas[?!]?|\bis)\s*(?:{_NAME}\s*\.\s*)*({_NAME})|\b({_NAME})\s*[(.]"
+)
+#: A member written as ``.member`` or called as ``member(``.
+_MEMBER_USE = re.compile(rf"\.\s*({_NAME})|\b({_NAME})\s*\(")
 
 
-def defined_symbol_used_elsewhere(graph: Any, path: str) -> bool:
-    """Whether a symbol *path* defines carries a use edge from another file.
+def strip_comments_and_strings(text: str) -> str:
+    """*text* with Swift comments and string literals blanked to spaces.
 
-    A use from the file itself does not count, or every file would reach
-    itself.
+    Handles nested ``/* */`` comments, ``\"\"\"`` multi-line strings and raw
+    strings (``#"..."#``, any number of ``#``). Interpolations inside a string
+    are blanked with it, which only costs a rescue.
     """
-    for _path, symbol, edge in graph.out_edges(path, data=True):
-        if edge.get("edge_type") != "defines":
+    out: list[str] = []
+    i, n = 0, len(text)
+    while i < n:
+        if text.startswith("//", i):
+            end = text.find("\n", i)
+            i = n if end < 0 else end
             continue
-        for user, _symbol, use in graph.in_edges(symbol, data=True):
-            if (
-                use.get("edge_type") in REACHABILITY_USE_EDGE_TYPES
-                and not is_external(user)
-                and file_path_of(user) != path
-            ):
-                return True
-    return False
+        if text.startswith("/*", i):
+            depth, i = 1, i + 2
+            while i < n and depth:
+                if text.startswith("/*", i):
+                    depth, i = depth + 1, i + 2
+                elif text.startswith("*/", i):
+                    depth, i = depth - 1, i + 2
+                else:
+                    i += 1
+            out.append(" ")
+            continue
+        hashes = 0
+        while i + hashes < n and text[i + hashes] == "#":
+            hashes += 1
+        quote = i + hashes
+        if quote < n and text[quote] == '"':
+            delim = '"""' if text.startswith('"""', quote) else '"'
+            close = delim + "#" * hashes
+            j = quote + len(delim)
+            while j < n and not text.startswith(close, j):
+                j += 2 if text[j] == "\\" and not hashes else 1
+            i = min(n, j + len(close))
+            out.append(" ")
+            continue
+        out.append(text[i])
+        i += 1
+    return "".join(out)
+
+
+def _names(pattern: re.Pattern[str], text: str) -> set[str]:
+    return {a or b for a, b in pattern.findall(text)}
 
 
 def _top_level(graph: Any, path: str) -> Iterable[dict]:
@@ -74,6 +111,12 @@ def _top_level(graph: Any, path: str) -> Iterable[dict]:
             data = graph.nodes.get(symbol, {})
             if not data.get("parent_name") and data.get("name"):
                 yield data
+
+
+def _defined(graph: Any, path: str) -> Iterable[tuple[str, dict]]:
+    for _path, symbol, edge in graph.out_edges(path, data=True):
+        if edge.get("edge_type") == "defines":
+            yield symbol, graph.nodes.get(symbol, {})
 
 
 def _swift_files(graph: Any) -> list[str]:
@@ -86,61 +129,111 @@ def _swift_files(graph: Any) -> list[str]:
     ]
 
 
-def build_swift_named_files(graph: Any, source_map: Mapping[str, bytes]) -> frozenset[str]:
-    """The Swift files a use edge, a type name or an extended type reaches.
+class _SwiftFacts:
+    """Declarations and name uses of every Swift file, read once."""
 
-    Only files with no importer are judged; the others are reachable anyway.
-    One pass over the Swift source collects the identifiers some candidate's
-    types are called. With no source at all, every candidate is returned:
+    def __init__(self, graph: Any, source_map: Mapping[str, bytes], files: list[str]) -> None:
+        self.declares: dict[str, set[str]] = {}  # type name -> declaring files
+        self.declared: dict[str, set[str]] = {}  # file -> type names it declares
+        self.extends: dict[str, set[str]] = {}  # file -> extended type names
+        self.members: dict[str, set[str]] = {}  # file -> its extensions' member names
+        self.member_files: dict[str, set[str]] = {}  # any symbol name -> declaring files
+        self.own: dict[str, set[str]] = {}  # file -> names it declares or extends
+        self.type_users: dict[str, set[str]] = {}  # name -> files writing it as a type
+        self.member_users: dict[str, set[str]] = {}  # name -> files writing it as a member
+        for path in files:
+            for data in _top_level(graph, path):
+                if data.get("kind") == _EXTENSION_KIND:
+                    name = data["name"].rsplit(".", 1)[-1]
+                    self.extends.setdefault(path, set()).add(name)
+                    self.own.setdefault(path, set()).add(name)
+            extended = self.extends.get(path, set())
+            for _symbol, data in _defined(graph, path):
+                name = (data.get("name") or "").strip("`")  # ``func `if`()``
+                if not name:
+                    continue
+                self.member_files.setdefault(name, set()).add(path)
+                # Nested types too: ``StatusEditor.EditorStore`` is declared
+                # inside an extension of ``StatusEditor``.
+                if data.get("kind") in _TYPE_KINDS:
+                    self.declares.setdefault(name, set()).add(path)
+                    self.declared.setdefault(path, set()).add(name)
+                    self.own.setdefault(path, set()).add(name)
+                if (data.get("parent_name") or "").rsplit(".", 1)[-1] in extended:
+                    self.members.setdefault(path, set()).add(name)
+            blob = source_map.get(path)
+            if blob is None:
+                continue
+            text = strip_comments_and_strings(blob.decode("utf-8", "ignore"))
+            for name in _names(_TYPE_USE, text):
+                self.type_users.setdefault(name, set()).add(path)
+            for name in _names(_MEMBER_USE, text):
+                self.member_users.setdefault(name, set()).add(path)
+
+
+def build_swift_named_files(graph: Any, source_map: Mapping[str, bytes]) -> frozenset[str]:
+    """The Swift files with no importer that a live file uses, names or extends.
+
+    Starts from the files that are live on their own (an entry, an importer, a
+    test) and adds a candidate only when a file already live reaches it, until
+    nothing changes. With no source at all every candidate is returned:
     unchecked is reachable, the answer ``ReachabilityRescues`` gives a caller
     that cannot check.
     """
-    candidates = [
+    files = _swift_files(graph)
+    candidates = {
         path
-        for path in _swift_files(graph)
+        for path in files
         if not is_reachability_root(graph.nodes[path])
+        and not graph.nodes[path].get("is_test", False)
         and not has_dependency_importer(graph, path)
-    ]
+    }
     if not source_map:
         return frozenset(candidates)
-    reached = {path for path in candidates if defined_symbol_used_elsewhere(graph, path)}
-    declares: dict[str, set[str]] = {}  # type name -> files declaring it
-    names_of: dict[str, set[bytes]] = {}  # file -> names it declares or extends
-    extends: dict[str, set[str]] = {}  # file -> types it extends
-    for path in _swift_files(graph):
-        for data in _top_level(graph, path):
-            name = data["name"]
-            if data.get("kind") in _TYPE_KINDS:
-                declares.setdefault(name, set()).add(path)
-                names_of.setdefault(path, set()).add(name.encode("ascii", "ignore"))
-            elif data.get("kind") == _EXTENSION_KIND:
-                extends.setdefault(path, set()).add(name)
-                names_of.setdefault(path, set()).add(name.encode("ascii", "ignore"))
+    facts = _SwiftFacts(graph, source_map, files)
+    reached: set[str] = set()
 
-    wanted: dict[bytes, set[str]] = {}
-    for path in candidates:
-        if path in reached:
-            continue
-        for data in _top_level(graph, path):
-            if data.get("kind") in _TYPE_KINDS:
-                wanted.setdefault(data["name"].encode("ascii", "ignore"), set()).add(path)
-    if wanted:
-        for path, blob in source_map.items():
-            if not path.endswith(SWIFT_SUFFIX):
+    def live(path: str) -> bool:
+        return path not in candidates or path in reached
+
+    def used_by_live(path: str) -> bool:
+        for symbol, _data in _defined(graph, path):
+            for user, _symbol, use in graph.in_edges(symbol, data=True):
+                if use.get("edge_type") not in REACHABILITY_USE_EDGE_TYPES or is_external(user):
+                    continue
+                source = file_path_of(user)
+                if source != path and live(source):
+                    return True
+        return False
+
+    def named_by_live(path: str) -> bool:
+        for name in facts.declared.get(path, ()):
+            if len(facts.declares.get(name, ())) != 1 or name in _SWIFT_COMMON_TYPES:
                 continue
-            own = names_of.get(path, set())
-            for token in set(_IDENT.findall(_code_only(blob))) & wanted.keys():
-                # A file declaring or extending the name is not using it.
-                if token not in own:
-                    reached.update(wanted[token])
+            for user in facts.type_users.get(name, ()):
+                if user != path and live(user) and name not in facts.own.get(user, ()):
+                    return True
+        return False
 
-    unreached = set(candidates) - reached
-    for path in candidates:
-        if path in reached:
-            continue
-        for name in extends.get(path, ()):
-            owners = declares.get(name, set())
-            if not owners or any(owner not in unreached for owner in owners):
+    def extends_live(path: str) -> bool:
+        for name in facts.extends.get(path, ()):
+            owners = facts.declares.get(name, set()) - {path}
+            if owners:
+                if any(live(owner) for owner in owners):
+                    return True
+                continue
+            for member in facts.members.get(path, ()):
+                if facts.member_files.get(member, set()) != {path}:
+                    continue
+                if any(u != path and live(u) for u in facts.member_users.get(member, ())):
+                    return True
+        return False
+
+    changed = True
+    while changed:
+        changed = False
+        for path in sorted(candidates - reached):
+            if used_by_live(path) or named_by_live(path) or extends_live(path):
                 reached.add(path)
-                break
+                changed = True
     return frozenset(reached)
