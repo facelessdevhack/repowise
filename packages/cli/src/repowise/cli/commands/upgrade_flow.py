@@ -48,6 +48,7 @@ from repowise.core.analysis.health import HEALTH_ANALYZER_VERSION
 from repowise.core.docs_mode import docs_mode_state_fields
 from repowise.core.index_scope import file_page_scope, stamp_index_scope
 from repowise.core.ingestion.git_indexer import GIT_HISTORY_VERSION, GIT_HISTORY_VERSION_KEY
+from repowise.core.ingestion.git_indexer._constants import _DEFAULT_COMMIT_LIMIT
 from repowise.core.update_lock import release_update_lock, try_acquire_update_lock
 
 
@@ -843,7 +844,9 @@ def upgrade_to_full(
             run_mode="standard",
             content_provenance="model",
             git_tier="full",
-            git_commit_cap=commit_limit if isinstance(commit_limit, int) else 500,
+            git_commit_cap=(
+                commit_limit if isinstance(commit_limit, int) else _DEFAULT_COMMIT_LIMIT
+            ),
             git_history_coverage=outcome["git_history_coverage"],
             file_pages=outcome["file_pages"],
             analysis={"unavailable": [], "skipped": []},

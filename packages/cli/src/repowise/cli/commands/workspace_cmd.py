@@ -583,7 +583,7 @@ def _run_index_for_repo(
     effective_model = model or primary_cfg.get("model")
     embedder_name = primary_cfg.get("embedder", "mock")
     exclude_patterns = list(primary_cfg.get("exclude_patterns") or [])
-    commit_limit = primary_cfg.get("commit_limit", 500)
+    commit_limit = primary_cfg.get("commit_limit")
 
     # Resolve the provider once. If docs were requested but provider
     # resolution fails, fall back to index-only with a loud notice instead
@@ -612,11 +612,12 @@ def _run_index_for_repo(
         # Shared full-index step (run pipeline, persist, export the curated KG
         # artifact so doc generation can load curated module grouping) — the
         # same helper the workspace updater's first-time indexing uses.
+        from repowise.core.ingestion.git_indexer._constants import _DEFAULT_COMMIT_LIMIT
         from repowise.core.pipeline.full_index import index_repo_full
 
         result = await index_repo_full(
             repo_path,
-            commit_depth=int(commit_limit) if commit_limit else 500,
+            commit_depth=int(commit_limit) if commit_limit else _DEFAULT_COMMIT_LIMIT,
             exclude_patterns=exclude_patterns,
         )
         return result.file_count, result.symbol_count, 0

@@ -47,8 +47,9 @@ _DECISION_SIGNAL_WORDS: frozenset[str] = frozenset(
 
 _MIN_MESSAGE_LEN = 12
 
-# Default per-file commit history depth.
-_DEFAULT_COMMIT_LIMIT: int = 500
+# Default history window: the newest commits walked for per-file history and
+# stored as commit rows. Every default ``commit_limit`` reads this one value.
+_DEFAULT_COMMIT_LIMIT: int = 5000
 
 # Depth of the second, deeper repo-wide log walk that serves files absent
 # from the recent-window commit index. On repos whose history is much
@@ -325,7 +326,8 @@ HOTSPOT_HALFLIFE_DAYS: float = 180.0
 #: v2: co-change records carry focused_frequency, the shared commits no wider
 #: than the change-entropy sweep cap.
 #: v3: commits carry their category, and changes are rebuilt from history.
-GIT_HISTORY_VERSION: int = 3
+#: v4: the default history window grew from 500 to 5,000 commits.
+GIT_HISTORY_VERSION: int = 4
 GIT_HISTORY_VERSION_KEY = "git_history_version"
 #: Stored under :data:`GIT_HISTORY_VERSION_KEY` by ``repowise attribution
 #: backfill`` so the next update re-walks history to label the newly bound

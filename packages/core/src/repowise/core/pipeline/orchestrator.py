@@ -23,6 +23,7 @@ from typing import Any
 
 import structlog
 
+from repowise.core.ingestion.git_indexer._constants import _DEFAULT_COMMIT_LIMIT
 from repowise.core.pipeline.modes import OrchestratorMode
 from repowise.core.pipeline.progress import (
     STAGE_ANALYSIS,
@@ -190,7 +191,7 @@ class PipelineResult:
 async def run_pipeline(
     repo_path: Path | str,
     *,
-    commit_depth: int = 500,
+    commit_depth: int = _DEFAULT_COMMIT_LIMIT,
     follow_renames: bool = False,
     skip_tests: bool = False,
     skip_infra: bool = False,
@@ -223,7 +224,7 @@ async def run_pipeline(
     repo_path:
         Path to an already-cloned repository on disk.
     commit_depth:
-        Maximum commits to analyse per file (1-10000). Default 500.
+        Maximum commits to analyse per file (1-10000). Default 5000.
     follow_renames:
         Use ``git log --follow`` to track files across renames.
     skip_tests:

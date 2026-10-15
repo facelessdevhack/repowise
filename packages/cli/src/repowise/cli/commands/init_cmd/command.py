@@ -622,7 +622,7 @@ def _interactive_gate(
     "--commit-limit",
     type=int,
     default=None,
-    help="Max commits to analyze per file and for co-change detection (default: 500, max: 10000). Saved to config.",
+    help="Max commits to analyze per file and for co-change detection (default: 5000, max: 10000). Saved to config.",
 )
 @click.option(
     "--follow-renames",
@@ -1286,8 +1286,12 @@ def init_command(
     resolved_reasoning = resolve_reasoning(reasoning, config)
     exclude_patterns: list[str] = list(config.get("exclude_patterns") or []) + list(exclude)
 
-    # Resolve commit limit: CLI flag → config.yaml → default (500)
-    resolved_commit_limit: int = commit_limit or config.get("commit_limit") or 500
+    # Resolve commit limit: CLI flag → config.yaml → default
+    from repowise.core.ingestion.git_indexer._constants import _DEFAULT_COMMIT_LIMIT
+
+    resolved_commit_limit: int = (
+        commit_limit or config.get("commit_limit") or _DEFAULT_COMMIT_LIMIT
+    )
     resolved_commit_limit = max(1, min(resolved_commit_limit, 10000))
     if commit_limit is not None:
         config["commit_limit"] = resolved_commit_limit

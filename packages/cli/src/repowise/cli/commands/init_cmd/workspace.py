@@ -894,7 +894,9 @@ def _workspace_init(
     console.print()
 
     # Step 4: Index each selected repo (always generate_docs=False; generation is separate)
-    resolved_commit_limit = max(1, min(commit_limit or 500, 10000))
+    from repowise.core.ingestion.git_indexer._constants import _DEFAULT_COMMIT_LIMIT
+
+    resolved_commit_limit = max(1, min(commit_limit or _DEFAULT_COMMIT_LIMIT, 10000))
     total_files = 0
     total_symbols = 0
     total_pages = 0
