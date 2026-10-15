@@ -530,6 +530,17 @@ _RESOURCE_CLASS_FILES: tuple[str, ...] = tuple(
 #: also out of ``com.acme.db.JsonTypeHandler.parse``. Only a name that resolves
 #: to a class in the repository counts, so a framework FQN matches nothing.
 _RESOURCE_FQN_RE = re.compile(r"(?<![\w.$])((?:[a-z_][a-z0-9_]*\.)+[A-Z][A-Za-z0-9_]*)")
+#: Comments per resource format: a class named only in one is not loaded.
+#: XML ``<!-- -->``; YAML ``#`` at a line start or after whitespace;
+#: ``.properties`` comment lines (``#`` or ``!``); SQL ``--`` and ``/* */``.
+_YAML_COMMENT_RE = re.compile(r"(?:^|(?<=\s))#[^\n]*")
+_RESOURCE_COMMENT_RE: dict[str, re.Pattern[str]] = {
+    ".xml": re.compile(r"<!--.*?-->", re.DOTALL),
+    ".yml": _YAML_COMMENT_RE,
+    ".yaml": _YAML_COMMENT_RE,
+    ".properties": re.compile(r"^[ \t]*[#!][^\n]*", re.MULTILINE),
+    ".sql": re.compile(r"--[^\n]*|/\*.*?\*/", re.DOTALL),
+}
 #: Data dumps (a seed ``.sql`` of many megabytes) are skipped unread.
 #: Ceiling: a class named only inside such a file is missed.
 _RESOURCE_MAX_BYTES = 1_000_000
@@ -557,6 +568,9 @@ def resource_class_names(ctx: ResolverContext) -> set[str]:
             text = resource.read_text(encoding="utf-8", errors="ignore")
         except OSError:
             continue
+        comments = _RESOURCE_COMMENT_RE.get(resource.suffix.lower())
+        if comments is not None:
+            text = comments.sub(" ", text)
         names.update(_RESOURCE_FQN_RE.findall(text))
     return names
 

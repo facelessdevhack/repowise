@@ -36,20 +36,31 @@ _FILES = {
     f"{_COMMON}/logging/CustomP6SpyLogger.java": _cls("common.logging", "CustomP6SpyLogger"),
     f"{_COMMON}/testonly/TestOnlyFunction.java": _cls("common.testonly", "TestOnlyFunction"),
     f"{_COMMON}/orphan/Orphan.java": _cls("common.orphan", "Orphan"),
+    # Each named only inside a comment of one resource format.
+    **{
+        f"{_COMMON}/{name.lower()}/{name}.java": _cls(f"common.{name.lower()}", name)
+        for name in ("InXmlComment", "InYmlComment", "InPropsComment", "InSqlComment")
+    },
     f"{_RES}/jpa/configdb.init.h2.sql": (
         "CREATE ALIAS IF NOT EXISTS UNIX_TIMESTAMP FOR "
         '"org.sample.common.jpa.H2Function.unixTimestamp";\n'
+        "-- CREATE ALIAS OLD FOR \"org.sample.common.insqlcomment.InSqlComment.run\";\n"
     ),
     f"{_RES}/application.yml": (
         "spring:\n  jpa:\n    properties:\n      hibernate:\n"
         "        metadata_builder_contributor: "
         "org.sample.common.hibernate.SqlFunctionsContributor\n"
+        "        # was: org.sample.common.inymlcomment.InYmlComment\n"
     ),
     f"{_RES}/mapper/OrderMapper.xml": (
         '<mapper namespace="x">\n  <result column="tags" property="tags" '
-        'typeHandler="org.sample.common.mybatis.JsonStringArrayTypeHandler"/>\n</mapper>\n'
+        'typeHandler="org.sample.common.mybatis.JsonStringArrayTypeHandler"/>\n'
+        "  <!-- typeHandler=org.sample.common.inxmlcomment.InXmlComment -->\n</mapper>\n"
     ),
-    f"{_RES}/spy.properties": "logMessageFormat=org.sample.common.logging.CustomP6SpyLogger\n",
+    f"{_RES}/spy.properties": (
+        "logMessageFormat=org.sample.common.logging.CustomP6SpyLogger\n"
+        "# logMessageFormat=org.sample.common.inpropscomment.InPropsComment\n"
+    ),
     "app/src/test/resources/import.sql": (
         'CREATE ALIAS T FOR "org.sample.common.testonly.TestOnlyFunction.run";\n'
     ),
@@ -91,3 +102,8 @@ def test_classes_main_resources_name_are_not_reported(tmp_path: Path) -> None:
 def test_test_resources_and_unnamed_classes_are_still_reported(tmp_path: Path) -> None:
     flagged = _flagged(_report(tmp_path))
     assert {"TestOnlyFunction", "Orphan"} <= flagged
+
+
+def test_a_class_named_only_in_a_resource_comment_is_still_reported(tmp_path: Path) -> None:
+    flagged = _flagged(_report(tmp_path))
+    assert {"InXmlComment", "InYmlComment", "InPropsComment", "InSqlComment"} <= flagged
